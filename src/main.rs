@@ -65,20 +65,21 @@ impl Drop for PhpRuntime {
 fn configure_windows_php_dll_directory() -> Result<(), String> {
     #[cfg(windows)]
     {
+        // 1. Read from the environment variable, or fall back to a safe, generic system path
         let php_dir = env::var("RUSTENPHP_PHP_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(r"C:\Users\korom\.config\herd\bin\php82"));
+            .unwrap_or_else(|_| PathBuf::from(r"C:\php"));
+            
         let php_dir = CString::new(php_dir.to_string_lossy().as_bytes())
             .map_err(|_| "PHP directory path contains an interior null byte".to_string())?;
         let status = unsafe { SetDllDirectoryA(php_dir.as_ptr()) };
 
         if status == 0 {
-            return Err("SetDllDirectoryA failed for the PHP runtime directory".to_string());
+            return Err("SetDllDirectoryA failed for the PHP runtime directory. Ensure RUSTENPHP_PHP_DIR is set correctly.".to_string());
         }
     }
     Ok(())
 }
-
 // A payload structure to pass work from the TCP threads to the PHP background thread
 struct PhpWorkJob {
     php_code: String,
@@ -108,10 +109,10 @@ fn main() -> Result<(), String> {
 
 fn serve_laravel() -> Result<(), String> {
     let laravel_root = env::var("RUSTENPHP_LARAVEL_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(r"C:\Users\korom\Documents\Codex\2026-05-16\i-want-you-to-create-a\lettings-mvp")
-        });
+    .map(PathBuf::from)
+    .unwrap_or_else(|_| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    });
     let public_root = laravel_root.join("public");
     
     // Change directory to Laravel root ONCE at startup
