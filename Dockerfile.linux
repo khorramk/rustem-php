@@ -1,0 +1,57 @@
+FROM rust:1.89-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libargon2-dev \
+        libphp8.2-embed \
+        libsodium-dev \
+        libssl-dev \
+        libxml2-dev \
+        libpcre2-dev \
+        php8.2-cli \
+        php8.2-curl \
+        php8.2-dev \
+        php8.2-mbstring \
+        php8.2-pgsql \
+        php8.2-sqlite3 \
+        php8.2-xml \
+        php8.2-zip \
+        pkg-config \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cargo build --release
+
+RUN mkdir -p /out \
+    && cp target/release/rustenphp-embed /out/rustenphp \
+    && ldd /out/rustenphp > /out/rustenphp.ldd.txt
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libphp8.2-embed \
+        php8.2-cli \
+        php8.2-curl \
+        php8.2-mbstring \
+        php8.2-pgsql \
+        php8.2-sqlite3 \
+        php8.2-xml \
+        php8.2-zip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /out/rustenphp /usr/local/bin/rustenphp
+COPY examples/mini-app /app
+
+EXPOSE 8787
+ENV RUSTENPHP_LARAVEL_ROOT=/app
+ENV RUSTENPHP_HOST=0.0.0.0
+ENV RUSTENPHP_PORT=8787
+
+CMD ["rustenphp", "serve"]

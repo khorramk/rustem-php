@@ -1,0 +1,15 @@
+services:
+  rustenphp:
+    image: rustenphp-linux
+    build:
+      context: .
+      dockerfile: Dockerfile.linux
+    ports:
+      - "8787:8787"
+    environment:
+      RUSTENPHP_HOST: "0.0.0.0"
+      RUSTENPHP_PORT: "8787"
+      RUSTENPHP_LARAVEL_ROOT: "/app"
+    mem_limit: 1g
+    cpus: 0.25
+    restart: unless-stopped
