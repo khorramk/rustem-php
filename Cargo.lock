@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "rustenphp-embed"
+name = "rustem-php"
 version = "0.1.0"
