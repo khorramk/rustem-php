@@ -1,3 +1,4 @@
 /target
 /examples/mini-app/
 Cargo.lock
+dist-linux
