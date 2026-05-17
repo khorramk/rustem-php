@@ -1,8 +1,8 @@
-# RustenPHP-Embed 🚀
+# Rustem-PHP-Embed 🚀
 
-A hyper-optimized, ultra-lean application server and runtime for Laravel, built entirely in Rust. By embedding the C-based PHP Zend Engine directly into a native Rust binary via Foreign Function Interface (FFI), RustenPHP completely eliminates the need for traditional web servers like Nginx, Apache, or PHP-FPM pools.
+A hyper-optimized, ultra-lean application server and runtime for Laravel, built entirely in Rust. By embedding the C-based PHP Zend Engine directly into a native Rust binary via Foreign Function Interface (FFI), Rustem-PHP completely eliminates the need for traditional web servers like Nginx, Apache, or PHP-FPM pools.
 
-Instead of booting and tearing down the framework on every request, RustenPHP boots Laravel **exactly once** into a persistent background worker thread, serving concurrent requests in double-digit milliseconds while utilizing a fraction of the RAM of a traditional stack.
+Instead of booting and tearing down the framework on every request, rustemPHP boots Laravel **exactly once** into a persistent background worker thread, serving concurrent requests in double-digit milliseconds while utilizing a fraction of the RAM of a traditional stack.
 
 ## ✨ Key Features
 
@@ -35,4 +35,4 @@ The runtime needs to know where your PHP installation directory lives to locate 
 By default, the runtime checks for Laravel Herd's PHP path (`C:\Users\<user>\.config\herd\bin\php82`). You can easily override this by setting an environment variable in your terminal:
 
 ```powershell
-$env:RUSTENPHP_PHP_DIR = "C:\Path\To\Your\Php\Installation"
+$env:rustemPHP_PHP_DIR = "C:\Path\To\Your\Php\Installation"
