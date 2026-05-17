@@ -6,6 +6,8 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     ptr,
+    sync::mpsc::{self, Sender},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -74,8 +76,14 @@ fn configure_windows_php_dll_directory() -> Result<(), String> {
             return Err("SetDllDirectoryA failed for the PHP runtime directory".to_string());
         }
     }
-
     Ok(())
+}
+
+// A payload structure to pass work from the TCP threads to the PHP background thread
+struct PhpWorkJob {
+    php_code: String,
+    output_path: PathBuf,
+    response_tx: mpsc::SyncSender<Result<(), String>>,
 }
 
 fn main() -> Result<(), String> {
@@ -105,6 +113,27 @@ fn serve_laravel() -> Result<(), String> {
             PathBuf::from(r"C:\Users\korom\Documents\Codex\2026-05-16\i-want-you-to-create-a\lettings-mvp")
         });
     let public_root = laravel_root.join("public");
+    
+    // Change directory to Laravel root ONCE at startup
+    env::set_current_dir(&laravel_root)
+        .map_err(|error| format!("failed to chdir to Laravel root {}: {error}", laravel_root.display()))?;
+
+    // Create a channel for assigning work tasks to the background PHP worker
+    let (tx, rx) = mpsc::channel::<PhpWorkJob>();
+
+    // Spawn ONE dedicated background thread where the PHP Engine stays booted forever
+    thread::spawn(move || {
+        println!("Booting persistent PHP runtime background worker thread...");
+        let runtime = PhpRuntime::boot().expect("Failed to boot persistent background PHP runtime");
+        
+        // Listen continuously for incoming execution strings from TCP workers
+        for job in rx {
+            let eval_result = runtime.eval(&job.php_code);
+            // Inform the requesting TCP connection thread that compilation completed
+            let _ = job.response_tx.send(eval_result);
+        }
+    });
+
     let host = env::var("RUSTENPHP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = env::var("RUSTENPHP_PORT").unwrap_or_else(|_| "8787".to_string());
     let address = format!("{host}:{port}");
@@ -112,15 +141,23 @@ fn serve_laravel() -> Result<(), String> {
         .map_err(|error| format!("failed to bind {address}: {error}"))?;
 
     println!("rustenphp embedded Laravel server listening on http://{address}");
-    println!("Laravel root: {}", laravel_root.display());
 
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if let Err(error) = handle_connection(&mut stream, &laravel_root, &public_root, &host, &port) {
-                    let body = format!("rustenphp error: {error}");
-                    let _ = write_response(&mut stream, 500, "text/plain; charset=utf-8", body.as_bytes());
-                }
+                let tx_clone = tx.clone();
+                let laravel_root_clone = laravel_root.clone();
+                let public_root_clone = public_root.clone();
+                let host_clone = host.clone();
+                let port_clone = port.clone();
+
+                // Handle network operations asynchronously using native multi-threading
+                thread::spawn(move || {
+                    if let Err(error) = handle_connection(&mut stream, &laravel_root_clone, &public_root_clone, &host_clone, &port_clone, &tx_clone) {
+                        let body = format!("rustenphp error: {error}");
+                        let _ = write_response(&mut stream, 500, "text/plain; charset=utf-8", body.as_bytes());
+                    }
+                });
             }
             Err(error) => eprintln!("connection failed: {error}"),
         }
@@ -131,10 +168,11 @@ fn serve_laravel() -> Result<(), String> {
 
 fn handle_connection(
     stream: &mut TcpStream,
-    laravel_root: &Path,
+    _laravel_root: &Path,
     public_root: &Path,
     host: &str,
     port: &str,
+    php_worker_tx: &Sender<PhpWorkJob>,
 ) -> Result<(), String> {
     let request = read_http_request(stream)?;
     let Some(request_line) = request.lines().next() else {
@@ -155,14 +193,18 @@ fn handle_connection(
         );
     }
 
+   
+// Find this block inside your handle_connection function
     if let Some(static_file) = resolve_static_file(public_root, path) {
         let body = fs::read(&static_file)
             .map_err(|error| format!("failed to read static file {}: {error}", static_file.display()))?;
         return write_response(stream, 200, content_type(&static_file), &body);
     }
 
-    let body = run_laravel_request(laravel_root, public_root, method, target, path, query, host, port)?;
+    // UPDATE THIS LINE to pass laravel_root forward:
+    let body = run_laravel_request(_laravel_root, public_root, method, target, query, host, port, php_worker_tx)?;
     write_response(stream, 200, "text/html; charset=utf-8", body.as_bytes())
+
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
@@ -197,26 +239,23 @@ fn resolve_static_file(public_root: &Path, path: &str) -> Option<PathBuf> {
 }
 
 fn run_laravel_request(
-    laravel_root: &Path,
+    laravel_root: &Path, // <-- Add this line back in!
     public_root: &Path,
     method: &str,
     target: &str,
-    _path: &str,
     query: &str,
     host: &str,
     port: &str,
+    php_worker_tx: &Sender<PhpWorkJob>,
 ) -> Result<String, String> {
     let output_path = env::temp_dir().join(format!("rustenphp-response-{}.html", unique_id()));
     let index_path = public_root.join("index.php");
-
-    env::set_current_dir(laravel_root)
-        .map_err(|error| format!("failed to chdir to Laravel root {}: {error}", laravel_root.display()))?;
-
     let php = format!(
         r#"
 $__rustenphp_output_path = {output_path};
 error_reporting(E_ALL);
 ini_set('display_errors', '1');
+
 register_shutdown_function(function () use ($__rustenphp_output_path) {{
     $error = error_get_last();
     if ($error && !file_exists($__rustenphp_output_path)) {{
@@ -228,6 +267,7 @@ register_shutdown_function(function () use ($__rustenphp_output_path) {{
 }});
 
 try {{
+    // 1. Setup the standard request superglobals for this specific turn
     $_SERVER['REQUEST_METHOD'] = {method};
     $_SERVER['REQUEST_URI'] = {target};
     $_SERVER['QUERY_STRING'] = {query};
@@ -240,14 +280,43 @@ try {{
     $_SERVER['SERVER_PROTOCOL'] = 'HTTP/1.1';
     $_SERVER['HTTP_HOST'] = {http_host};
     $_SERVER['HTTPS'] = 'off';
+    
     $_GET = [];
     parse_str({query}, $_GET);
     $_POST = [];
     $_REQUEST = $_GET;
+
+    // 2. Clear out any previous output buffers left over
+    while (ob_get_level() > 0) {{
+        ob_end_clean();
+    }}
     ob_start();
-    require {index_path};
+
+    // 3. Define LARAVEL_START conditionally if it doesn't exist in our global runtime yet
+    if (!defined('LARAVEL_START')) {{
+        define('LARAVEL_START', microtime(true));
+    }}
+
+    // 4. Use require_once for Composer's autoloader so it doesn't re-register functions
+    require_once {laravel_root} . '/vendor/autoload.php';
+
+    // 5. Boot or resolve the Kernel application instance
+    // We check if we already booted the app in a previous request to keep it ultra-fast
+    global $__rustenphp_app, $__rustenphp_kernel;
+    if (!$__rustenphp_app) {{
+        $__rustenphp_app = require_once {laravel_root} . '/bootstrap/app.php';
+        $__rustenphp_kernel = $__rustenphp_app->make(Illuminate\Contracts\Http\Kernel::class);
+    }}
+
+    // 6. Handle the incoming request through the persistent kernel
+    $__rustenphp_request = Illuminate\Http\Request::capture();
+    $__rustenphp_response = $__rustenphp_kernel->handle($__rustenphp_request);
+    $__rustenphp_response->send();
+    $__rustenphp_kernel->terminate($__rustenphp_request, $__rustenphp_response);
+
     $__rustenphp_body = ob_get_clean();
     file_put_contents($__rustenphp_output_path, $__rustenphp_body);
+
 }} catch (Throwable $exception) {{
     while (ob_get_level() > 0) {{
         ob_end_clean();
@@ -266,20 +335,36 @@ try {{
         http_host = php_string(&format!("{host}:{port}")),
         script_filename = php_string(&index_path.to_string_lossy()),
         document_root = php_string(&public_root.to_string_lossy()),
-        index_path = php_string(&index_path.to_string_lossy()),
+        laravel_root = php_string(&laravel_root.to_string_lossy()),
         output_path = php_string(&output_path.to_string_lossy()),
     );
+    // Create a local synchronous single-use response back-channel
+    let (reply_tx, reply_rx) = mpsc::sync_channel(0);
 
-    {
-        let runtime = PhpRuntime::boot()?;
-        runtime.eval(&php)?;
-    }
+    let job = PhpWorkJob {
+        php_code: php,
+        output_path: output_path.clone(),
+        response_tx: reply_tx,
+    };
+
+    // Send the execution job down to the background PHP thread
+    php_worker_tx
+        .send(job)
+        .map_err(|_| "PHP background worker thread panicked or stopped".to_string())?;
+
+    // Block the local network connection thread until the background PHP engine responds
+    reply_rx
+        .recv()
+        .map_err(|_| "Failed to receive response from PHP worker".to_string())??;
 
     let body = fs::read_to_string(&output_path)
         .map_err(|error| format!("failed to read PHP response {}: {error}", output_path.display()))?;
     let _ = fs::remove_file(output_path);
 
+
     Ok(body)
+
+    
 }
 
 fn write_response(
